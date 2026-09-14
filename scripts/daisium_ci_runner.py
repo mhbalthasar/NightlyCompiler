@@ -263,7 +263,9 @@ def parse(path, inputs, github, repo_dir, outputs_file, summary_file):
                     rdef = (job.get("defaults") or {}).get("run") or {}
                     job_shell = rdef.get("shell", "")
                     job_shell_wd = rdef.get("working-directory", "")
-                    shell = gh_str(resolve(st.get("shell") or job_shell or "", sctx))
+                    shell = gh_str(resolve(st.get("shell") or job_shell or "", sctx)).strip()
+                    if not shell:
+                        shell = "pwsh" if osname == "Windows" else "bash"
                     wd = gh_str(resolve(job_shell_wd, sctx))
                     blocks.append({"kind": "run", "name": gh_str(resolve(st.get("name", "run"), sctx)),
                                    "shell": shell.lower(), "code": resolve(st["run"], sctx),
@@ -481,7 +483,7 @@ def exec_unit():
                     tf.close()
                     cmd = [sys.executable, tf.name]
                 else:
-                    raise SystemExit("unsupported shell " + shell)
+                    raise SystemExit("unsupported shell %r for block %r" % (shell, b.get("name")))
                 cwd = os.path.join(repo_dir, b.get("workdir", "")) if b.get("workdir", "") else repo_dir
                 fds = {}
                 step_env = dict(base_env)
