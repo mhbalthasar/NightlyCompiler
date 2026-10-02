@@ -30,6 +30,9 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 
 SUPPORTED_USES = {
@@ -339,13 +342,44 @@ def _apply_gh_files(env, files):
         os.remove(path)
 
 
+# --------------------------------------------------------------------------
+# artifact download
+#
+# urllib's HTTPRedirectHandler copies every request header except
+# Content-Length / Content-Type onto the redirect target - *including*
+# Authorization - and it does not care whether the host changed.
+#
+# GitHub's artifact endpoint answers 302 with a Location on Azure Blob
+# (*.blob.core.windows.net) that already carries a SAS signature.  The
+# forwarded "Authorization: Bearer <GITHUB_TOKEN>" makes Azure treat the
+# request as a failed bearer auth and answer
+#     401 NoAuthenticationInformation
+#     "Server failed to authenticate the request. Please refer to the
+#      information in the www-authenticate header."
+# so downloading an artifact that does exist fails with a bogus 401.
+#
+# Drop the credential whenever a redirect leaves the current host.
+# --------------------------------------------------------------------------
+class _StripAuthOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            old = urllib.parse.urlsplit(req.full_url)
+            nw = urllib.parse.urlsplit(newurl)
+            if (nw.scheme, nw.netloc) != (old.scheme, old.netloc):
+                for h in ("Authorization",):
+                    new.headers.pop(h, None)
+                    new.unredirected_hdrs.pop(h, None)
+        return new
+
+
 def _download_artifacts(block, env):
-    import urllib.request
     token = env.get("GITHUB_TOKEN") or ""
     api = env.get("GITHUB_API_URL", "https://api.github.com")
     repo = env["GITHUB_REPOSITORY"]
     run = env["GITHUB_RUN_ID"]
     want = block.get("artifact") or ""
+    opener = urllib.request.build_opener(_StripAuthOnCrossHostRedirect)
 
     def get(url, raw=False):
         req = urllib.request.Request(url, headers={
@@ -353,8 +387,17 @@ def _download_artifacts(block, env):
             "Accept": "application/vnd.github+json",
             "User-Agent": "daisium-ci-runner",
             "X-GitHub-Api-Version": "2022-11-28"})
-        with urllib.request.urlopen(req) as resp:
-            return resp.read() if raw else json.loads(resp.read())
+        try:
+            with opener.open(req) as resp:
+                return resp.read() if raw else json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            extra = ""
+            for h in ("www-authenticate", "Location"):
+                v = e.headers.get(h) if e.headers else None
+                if v:
+                    extra += "\n  %s: %s" % (h, v)
+            sys.stderr.write("[exec] HTTP %s for %s%s\n" % (e.code, url, extra))
+            raise
 
     base = "%s/repos/%s/actions/runs/%s" % (api, repo, run)
     page = 1
