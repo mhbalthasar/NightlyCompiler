@@ -9,6 +9,9 @@ name: daisium-predict-nightly-compiler
 #  ci.yml is the single source of truth: job structure, matrix, toolchain
 #  steps, build commands and upload names/paths are all read from it at run
 #  time. Adding a target to ci.yml automatically appears here next run.
+#  ci.yml's `actions/cache` steps are read the same way: `plan` forwards
+#  path/key/step-id per unit, this workflow restores them with the real
+#  actions/cache@v4, and exec-unit skips the steps gated on a cache hit.
 # ============================================================================
 
 on:
@@ -87,9 +90,23 @@ jobs:
           token: ${{ secrets.CI_PAT_STRING }}
           path: dp
 
+      # ci.yml's own `actions/cache` steps are restored here with the real
+      # action (blob I/O / chunking / eviction stay upstream). The runner then
+      # skips whatever ci.yml gated behind `cache-hit != 'true'`.
+      - name: Restore ci.yml cache
+        id: dp-cache
+        if: matrix.cache.key != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.cache.paths_joined }}
+          key: ${{ matrix.cache.key }}
+          restore-keys: ${{ matrix.cache.restore_keys }}
+
       - name: Execute ci.yml steps
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DP_CACHE_STEP_ID: ${{ matrix.cache.step_id }}
+          DP_CACHE_HIT: ${{ steps.dp-cache.outputs.cache-hit }}
         run: python3 scripts/daisium_ci_runner.py exec-unit
 
       - name: Upload build outputs
@@ -124,9 +141,23 @@ jobs:
           token: ${{ secrets.CI_PAT_STRING }}
           path: dp
 
+      # ci.yml's own `actions/cache` steps are restored here with the real
+      # action (blob I/O / chunking / eviction stay upstream). The runner then
+      # skips whatever ci.yml gated behind `cache-hit != 'true'`.
+      - name: Restore ci.yml cache
+        id: dp-cache
+        if: matrix.cache.key != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.cache.paths_joined }}
+          key: ${{ matrix.cache.key }}
+          restore-keys: ${{ matrix.cache.restore_keys }}
+
       - name: Execute ci.yml steps
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DP_CACHE_STEP_ID: ${{ matrix.cache.step_id }}
+          DP_CACHE_HIT: ${{ steps.dp-cache.outputs.cache-hit }}
         run: python3 scripts/daisium_ci_runner.py exec-unit
 
       - name: Upload build outputs
@@ -161,9 +192,23 @@ jobs:
           token: ${{ secrets.CI_PAT_STRING }}
           path: dp
 
+      # ci.yml's own `actions/cache` steps are restored here with the real
+      # action (blob I/O / chunking / eviction stay upstream). The runner then
+      # skips whatever ci.yml gated behind `cache-hit != 'true'`.
+      - name: Restore ci.yml cache
+        id: dp-cache
+        if: matrix.cache.key != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.cache.paths_joined }}
+          key: ${{ matrix.cache.key }}
+          restore-keys: ${{ matrix.cache.restore_keys }}
+
       - name: Execute ci.yml steps
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DP_CACHE_STEP_ID: ${{ matrix.cache.step_id }}
+          DP_CACHE_HIT: ${{ steps.dp-cache.outputs.cache-hit }}
         run: python3 scripts/daisium_ci_runner.py exec-unit
 
       - name: Upload build outputs

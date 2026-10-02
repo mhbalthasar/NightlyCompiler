@@ -16,8 +16,13 @@ Actions mapping (executed locally, no remote dispatch):
   gha-setup-ninja            -> pip install ninja (target dir, PATH prepend)
   ilammy/msvc-dev-cmd        -> VsDevCmd.bat env import (arch from `with`)
   actions/setup-dotnet       -> verify preinstalled dotnet
-  actions/cache              -> no-op (always cache-miss; dependent `if:` is
-                                resolved at plan time -> consumer step runs)
+  actions/cache              -> recorded as unit.cache; the WORKFLOW restores it
+                                with a real actions/cache@v4 step (so blob I/O,
+                                chunking and eviction stay with the official
+                                action) and reports the result back through
+                                DP_CACHE_STEP_ID / DP_CACHE_HIT.  Any `if:` that
+                                reads a step output is therefore deferred to
+                                exec-unit instead of being resolved here.
   actions/download-artifact  -> same-run artifacts via REST (GITHUB_TOKEN)
   actions/upload-artifact    -> recorded as unit.upload (real upload happens
                                 as a matrix-driven step in the workflow)
@@ -179,6 +184,12 @@ def collect_steps(job):
     return steps
 
 
+# An `if:` that reads a *step output* cannot be decided by `plan`: that job runs
+# on its own runner, before any cache has been restored. Such conditions are
+# carried into the unit verbatim and re-evaluated by exec-unit (see emit()).
+_STEP_OUTPUT_RE = re.compile(r"\bsteps\s*\.")
+
+
 def _cond(raw, ctx):
     raw = raw.strip()
     if raw.startswith("${{"):
@@ -215,8 +226,10 @@ def parse(path, inputs, github, repo_dir, outputs_file, summary_file):
                 "github": github, "inputs": inputs, "env": dict(top_env),
                 "matrix": m, "vars": {}, "needs": {},
                 "strategy": (job.get("strategy") or {}),
-                "steps": {"ollvm-cache": {"outputs": {"cache-hit": "false"}},
-                          "osxcross-cache": {"outputs": {"cache-hit": "false"}}},
+                # No `steps` context on purpose: every `if:` that reads a step
+                # output is deferred to exec-unit (see _STEP_OUTPUT_RE), because
+                # cache-hit is unknowable on this runner.
+                "steps": {},
                 "runner": {"os": "", "arch": "x64"},
             }
             runs_on = gh_str(resolve(job.get("runs-on", "ubuntu-latest"), ctx))
@@ -226,11 +239,24 @@ def parse(path, inputs, github, repo_dir, outputs_file, summary_file):
             unit_id = re.sub(r"[^A-Za-z0-9]+", "-", tag).strip("-").lower() or job_id
             blocks = []
             upload = None
+            cache = None
+            pending = {"if": None}
+
+            def emit(b):
+                if pending["if"]:
+                    b["deferred_if"] = pending["if"]
+                blocks.append(b)
+
             for i, st in enumerate(collect_steps(job)):
                 sctx = dict(ctx)
                 sctx["steps"] = ctx["steps"]
+                pending["if"] = None
                 if "if" in st:
-                    if not _cond(st["if"], sctx):
+                    raw_if = gh_str(st["if"]).strip()
+                    if _STEP_OUTPUT_RE.search(raw_if):
+                        # deferred: exec-unit decides once the real value is known
+                        pending["if"] = raw_if
+                    elif not _cond(raw_if, sctx):
                         continue
                 uses = st.get("uses")
                 if uses:
@@ -250,15 +276,33 @@ def parse(path, inputs, github, repo_dir, outputs_file, summary_file):
                             "if_no_files": gh_str(with_.get("if-no-files-found", "warn")) or "warn",
                         }
                     elif kind == "download":
-                        blocks.append({"kind": "download", "name": gh_str(resolve(st.get("name", uses), sctx)),
-                                       "target": gh_str(with_.get("path", "artifacts")),
-                                       "artifact": gh_str(with_.get("name", ""))})
-                    elif kind in ("checkout", "cache"):
-                        blocks.append({"kind": kind, "name": gh_str(resolve(st.get("name", kind), sctx))})
+                        emit({"kind": "download", "name": gh_str(resolve(st.get("name", uses), sctx)),
+                              "target": gh_str(with_.get("path", "artifacts")),
+                              "artifact": gh_str(with_.get("name", ""))})
+                    elif kind == "cache":
+                        # The workflow restores this with a real actions/cache@v4
+                        # step (driven by unit["cache"]); here we only record the
+                        # step id so exec-unit can seed steps.<id>.outputs.cache-hit.
+                        if cache is not None:
+                            raise SystemExit("[plan] job %r has >1 cache step - unsupported" % job_id)
+                        cid = gh_str(st.get("id", ""))
+                        raw_paths = gh_str(with_.get("path", ""))
+                        cache = {
+                            "step_id": cid,
+                            "key": gh_str(with_.get("key", "")),
+                            "restore_keys": gh_str(with_.get("restore-keys", "")),
+                            "paths_joined": "\n".join(p.strip() for p in re.split(r"\n+", raw_paths) if p.strip()),
+                        }
+                        if not cid or not cache["key"] or not cache["paths_joined"]:
+                            raise SystemExit("[plan] cache step in job %r needs id/key/path" % job_id)
+                        emit({"kind": "cache", "id": cid,
+                              "name": gh_str(resolve(st.get("name", kind), sctx))})
+                    elif kind == "checkout":
+                        emit({"kind": kind, "name": gh_str(resolve(st.get("name", kind), sctx))})
                     elif kind in ("ninja", "msvc", "dotnet"):
-                        blocks.append({"kind": kind, "name": gh_str(resolve(st.get("name", kind), sctx)),
-                                       "arch": gh_str(with_.get("arch", "x64")),
-                                       "version": gh_str(with_.get("dotnet-version", ""))})
+                        emit({"kind": kind, "name": gh_str(resolve(st.get("name", kind), sctx)),
+                              "arch": gh_str(with_.get("arch", "x64")),
+                              "version": gh_str(with_.get("dotnet-version", ""))})
                     else:
                         raise SystemExit("[plan] unsupported uses: %r in job %r" % (uses, job_id))
                     continue
@@ -270,16 +314,17 @@ def parse(path, inputs, github, repo_dir, outputs_file, summary_file):
                     if not shell:
                         shell = "pwsh" if osname == "Windows" else "bash"
                     wd = gh_str(resolve(job_shell_wd, sctx))
-                    blocks.append({"kind": "run", "name": gh_str(resolve(st.get("name", "run"), sctx)),
-                                   "shell": shell.lower(), "code": resolve(st["run"], sctx),
-                                   "workdir": wd})
+                    emit({"kind": "run", "name": gh_str(resolve(st.get("name", "run"), sctx)),
+                          "shell": shell.lower(), "code": resolve(st["run"], sctx),
+                          "workdir": wd})
             if upload is None:
                 continue
             needs = job.get("needs") or []
             needs = [needs] if isinstance(needs, str) else list(needs)
             deps = sorted(set(n for n in needs if n in buildable_jobs))
             units.append({"id": unit_id, "name": tag, "job": job_id, "runs_on": runs_on,
-                          "layer": 0, "deps": deps, "upload": upload, "blocks": blocks})
+                          "layer": 0, "deps": deps, "upload": upload,
+                          "cache": cache or {}, "blocks": blocks})
 
     # topological layers (max 3)
     by_job = {}
@@ -465,19 +510,42 @@ def _msvc_dev_cmd(env, arch):
     return 0
 
 
+def _cache_hits_from_env(unit):
+    """The workflow restores unit["cache"] with a real actions/cache@v4 step and
+    hands the outcome back via DP_CACHE_STEP_ID / DP_CACHE_HIT.  Seed
+    steps.<id>.outputs.cache-hit from it so deferred `if:`s can be resolved."""
+    sid = os.environ.get("DP_CACHE_STEP_ID", "").strip()
+    declared = (unit.get("cache") or {}).get("step_id", "")
+    if not sid or sid != declared:
+        return {}
+    hit = os.environ.get("DP_CACHE_HIT", "").strip().lower()
+    return {sid: {"outputs": {"cache-hit": "true" if hit == "true" else "false"}}}
+
+
 def exec_unit():
     unit = json.loads(os.environ["UNIT_JSON"])
     repo_dir = os.environ.get("DP_REPO_DIR", "dp")
     base_env = dict(os.environ)
+    live_steps = _cache_hits_from_env(unit)
     rc_final = 0
+    skipped = []
     for i, b in enumerate(unit["blocks"]):
         kind = b["kind"]
         rc = 0
         print("::group::[%d/%d] %s" % (i + 1, len(unit["blocks"]), b.get("name", kind)))
         try:
+            # Conditions that read a step output were deferred by `plan`; now
+            # that the cache has really been restored we can decide them.
+            cond = b.get("deferred_if")
+            if cond and not _cond(cond, {"steps": live_steps}):
+                print("(skipped: if %s -> false)" % cond)
+                skipped.append(b.get("name", kind))
+                continue
             if kind in ("checkout", "cache", "dotnet"):
                 if kind == "cache":
-                    print("(cache emulated: always miss)")
+                    sid = b.get("id", "")
+                    hits = live_steps.get(sid, {}).get("outputs", {})
+                    print("(cache %s: %s)" % (sid or "?", "HIT" if hits.get("cache-hit") == "true" else "MISS"))
                 elif kind == "dotnet" and not _which("dotnet"):
                     raise SystemExit("dotnet missing on runner")
             elif kind == "ninja":
@@ -557,6 +625,8 @@ def exec_unit():
             break
     # record upload meta for the workflow's real upload step (already static),
     # nothing else to do.
+    if skipped:
+        print("skipped %d block(s) on deferred condition: %s" % (len(skipped), ", ".join(skipped)))
     if rc_final == 0:
         print("unit %r executed OK (artifact: %s)" % (unit["id"], unit["upload"]["name"]))
     sys.exit(rc_final)
