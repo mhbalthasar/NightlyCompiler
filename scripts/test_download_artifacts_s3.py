@@ -51,6 +51,28 @@ def make_fake_aws(calls, ls_output):
     return fake_run
 
 
+# AWS CLI v2 right-aligns the PRE marker. The fixture must carry that padding:
+# an unpadded "PRE name/" line is what let a ^PRE regex pass locally while the
+# real listing matched nothing.
+PADDED_LS = (" " * 27) + "PRE build-linux64/\n" \
+            + (" " * 27) + "PRE build-win64_msvc/\n" \
+            + (" " * 27) + "PRE build-wrapper/\n"
+
+
+def test_common_prefix_parser(mod, failures):
+    """Direct unit test on the parser, both real and unpadded shapes."""
+    got = mod._s3_common_prefixes(PADDED_LS)
+    if sorted(got) != ["build-linux64", "build-win64_msvc", "build-wrapper"]:
+        failures.append("parser: padded PRE lines -> %s" % got)
+    else:
+        print("[ok]   parser: AWS CLI v2 padded `PRE` lines parse")
+    unp = mod._s3_common_prefixes("PRE a/\nPRE b/\n2026-01-01 00:00:00 12 f.txt\n")
+    if sorted(unp) != ["a", "b"]:
+        failures.append("parser: unpadded PRE lines -> %s" % unp)
+    else:
+        print("[ok]   parser: unpadded PRE lines still parse, object lines ignored")
+
+
 def main():
     import tempfile
     mod = load_runner()
@@ -59,6 +81,8 @@ def main():
     # The aws CLI is not installed on dev machines; the S3 branch hard-guards for
     # it before touching subprocess, so stand in a path and fake the calls below.
     mod._which = lambda prog: "/usr/local/bin/aws" if prog == "aws" else None
+
+    test_common_prefix_parser(mod, failures)
 
     # ---- 1. dispatch: no prefix -> REST, untouched ------------------------
     try:
@@ -90,9 +114,7 @@ def main():
                 "AWS_SECRET_ACCESS_KEY": "s"}
 
     calls = []
-    mod.subprocess.run = make_fake_aws(calls, "PRE build-win64_msvc/\n"
-                                             "PRE build-linux64/\n"
-                                             "PRE build-wrapper/\n")
+    mod.subprocess.run = make_fake_aws(calls, PADDED_LS)
     try:
         tmp = tempfile.mkdtemp(prefix="s3_all_")
         # Two of the three "synced" dirs must look non-empty or the guard fires.

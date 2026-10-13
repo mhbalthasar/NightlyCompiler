@@ -450,6 +450,25 @@ def _s3_env(env, bucket, url):
     return out
 
 
+def _s3_common_prefixes(listing):
+    """Child "directory" names from `aws s3 ls <prefix>/`.
+
+    AWS CLI v2 right-aligns the marker, so a real line is
+    `                           PRE build-linux64/` with leading padding, not
+    `PRE build-linux64/`. Anchoring on ^PRE silently matches nothing and the
+    caller then reports an empty bucket that is actually full.
+    """
+    names = []
+    for line in listing.splitlines():
+        line = line.strip()
+        if not line.startswith("PRE "):
+            continue
+        name = line[4:].strip().rstrip("/")
+        if name:
+            names.append(name)
+    return names
+
+
 def _download_artifacts_s3(block, env):
     """S3 mirror of _download_artifacts_rest.
 
@@ -476,8 +495,7 @@ def _download_artifacts_s3(block, env):
     if want:
         names = [want]
     else:
-        # `aws s3 ls` on a prefix reports child "directories" as `PRE <name>/`.
-        names = sorted(set(re.findall(r"^PRE\s+(\S+)/$", ls(base), re.M)))
+        names = sorted(set(_s3_common_prefixes(ls(base))))
         if not names:
             raise SystemExit("[exec] no artifact prefixes under %s" % base)
 
