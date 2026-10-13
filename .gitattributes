@@ -1,0 +1,8 @@
+# Shell scripts here are executed via `shell: bash` even on windows-latest, where
+# GitHub's runner image sets core.autocrlf=true; a CRLF checkout makes bash fail on
+# the first line ($'\r': command not found). Pin LF so correctness does not depend on
+# the clone machine's git config.
+#
+# Scoped to *.sh on purpose: applying a blanket rule would rewrite the working-tree
+# line endings of the existing .py / .yaml files and bury this change in noise.
+*.sh text eol=lf
