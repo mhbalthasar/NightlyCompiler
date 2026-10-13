@@ -23,9 +23,13 @@ Actions mapping (executed locally, no remote dispatch):
                                 DP_CACHE_STEP_ID / DP_CACHE_HIT.  Any `if:` that
                                 reads a step output is therefore deferred to
                                 exec-unit instead of being resolved here.
-  actions/download-artifact  -> same-run artifacts via REST (GITHUB_TOKEN)
+  actions/download-artifact  -> same-run artifacts via REST (GITHUB_TOKEN), or
+                                same-run S3 prefixes when DP_S3_PREFIX is set
   actions/upload-artifact    -> recorded as unit.upload (real upload happens
                                 as a matrix-driven step in the workflow)
+
+S3 mode: the workflow owns the prefix and the credentials; this script only ever
+reads them back. An empty/absent DP_S3_PREFIX means the artifacts path unchanged.
 """
 import argparse
 import json
@@ -419,6 +423,81 @@ class _StripAuthOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _download_artifacts(block, env):
+    """Fetch one unit's cross-job inputs.
+
+    DP_S3_PREFIX empty/unset -> the original artifacts REST path, untouched.
+    Non-empty -> same run, same layout, objects read back from S3 instead.
+    """
+    if (env.get("DP_S3_PREFIX") or "").strip():
+        return _download_artifacts_s3(block, env)
+    return _download_artifacts_rest(block, env)
+
+
+def _s3_env(env, bucket, url):
+    """Environment for the aws CLI, with the failure modes pre-empted."""
+    missing = [n for n, v in (("BUCKET", bucket), ("S3_URL", url),
+                              ("AWS_ACCESS_KEY_ID", env.get("AWS_ACCESS_KEY_ID")),
+                              ("AWS_SECRET_ACCESS_KEY", env.get("AWS_SECRET_ACCESS_KEY")))
+               if not v]
+    if missing:
+        raise SystemExit("[exec] S3 mode but these are unset: %s" % " / ".join(missing))
+    if not _which("aws"):
+        raise SystemExit("[exec] aws CLI not found on this runner (S3 mode)")
+    out = dict(env)
+    # Without this the CLI queries EC2 IMDS for credentials and only fails after a
+    # long timeout, turning a missing secret into a mysterious stall.
+    out["AWS_EC2_METADATA_DISABLED"] = "true"
+    return out
+
+
+def _download_artifacts_s3(block, env):
+    """S3 mirror of _download_artifacts_rest.
+
+    Key layout is dictated by two things: what the upload step writes, and what
+    ci.yml does with the result. predict's bundle job enumerates *directories*
+    under `artifacts/` whose names are the artifact names, so each artifact
+    becomes one sub-prefix and lands in <target>/<artifact-name>/.
+    """
+    bucket = (env.get("BUCKET") or "").strip()
+    url = (env.get("S3_URL") or "").strip()
+    prefix = (env.get("DP_S3_PREFIX") or "").strip().strip("/")
+    want = block.get("artifact") or ""
+    s3env = _s3_env(env, bucket, url)
+    base = "s3://%s/%s/" % (bucket, prefix)
+
+    def ls(path):
+        cp = subprocess.run(["aws", "s3", "ls", path, "--endpoint-url", url],
+                            env=s3env, capture_output=True, text=True)
+        if cp.returncode != 0:
+            raise SystemExit("[exec] aws s3 ls %s failed: %s"
+                             % (path, (cp.stderr or "").strip()))
+        return cp.stdout
+
+    if want:
+        names = [want]
+    else:
+        # `aws s3 ls` on a prefix reports child "directories" as `PRE <name>/`.
+        names = sorted(set(re.findall(r"^PRE\s+(\S+)/$", ls(base), re.M)))
+        if not names:
+            raise SystemExit("[exec] no artifact prefixes under %s" % base)
+
+    for n in names:
+        dest = os.path.join(block["target"], n)
+        os.makedirs(dest, exist_ok=True)
+        print("syncing s3://%s/%s/%s/ -> %s" % (bucket, prefix, n, dest))
+        rc = subprocess.run(["aws", "s3", "sync", base + n + "/", dest,
+                             "--endpoint-url", url, "--only-show-errors",
+                             "--no-progress"], env=s3env).returncode
+        if rc != 0:
+            raise SystemExit("[exec] aws s3 sync failed for %r (exit %d)" % (n, rc))
+        # upload-artifact fails a job on an empty path (predict's ci.yml sets
+        # if-no-files-found: error everywhere). sync exits 0 on zero objects, so
+        # the guard has to be explicit or an empty prefix passes silently.
+        if not any(f for _r, _d, fs in os.walk(dest) for f in fs):
+            raise SystemExit("[exec] s3 prefix %r synced 0 files into %s" % (n, dest))
+
+
+def _download_artifacts_rest(block, env):
     token = env.get("GITHUB_TOKEN") or ""
     api = env.get("GITHUB_API_URL", "https://api.github.com")
     repo = env["GITHUB_REPOSITORY"]
