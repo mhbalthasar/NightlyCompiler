@@ -63,9 +63,7 @@
       "runner": "ubuntu-24.04",
       "timeout_minutes": 180,
       "free_disk": true,
-      "repos": [
-        "dp"
-      ],
+      "repos": [],
       "dest": "$HOME/tools/osxcross/target",
       "prepare": "bash scripts/envpkg/build_osxcross_dp.sh",
       "verify": "scripts/envpkg/verify_osxcross.sh",
@@ -84,9 +82,7 @@
       "runner": "ubuntu-24.04",
       "timeout_minutes": 180,
       "free_disk": true,
-      "repos": [
-        "opencyan"
-      ],
+      "repos": [],
       "dest": "$HOME/osxcross-target",
       "prepare": "bash scripts/envpkg/build_osxcross_opencyan.sh",
       "verify": "scripts/envpkg/verify_osxcross.sh",
@@ -94,7 +90,13 @@
         "bin/x86_64-apple-darwin*-clang",
         "bin/arm64-apple-darwin*-clang",
         "SDK/MacOSX{macos_sdk_ver}.sdk"
-      ]
+      ],
+      "vendored_from": {
+        "repo": "mhbalthasar/libOpenCyan",
+        "path": "compile_scripts/tools/prepare_osxcross.sh",
+        "copy": "scripts/envpkg/prepare_osxcross.sh",
+        "sha256": "944b1bdf4886b4aa365902831d25bf95a3e1693d680c66a19d38fbc3c1e37a77"
+      }
     }
   ]
 }

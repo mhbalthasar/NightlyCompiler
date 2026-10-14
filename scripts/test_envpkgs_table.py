@@ -8,6 +8,7 @@ mistake silently deletes the package some consumer just started depending on.
 
 Run:  python3 scripts/test_envpkgs_table.py
 """
+import hashlib
 import json
 import os
 import re
@@ -141,6 +142,37 @@ def main():
         # family, both directions above become fatal again.
         print("NOTE  no envpkg.sh call sites in the reachable consumer workflows; "
               "%d family(s) published, request checks skipped" % len(published))
+
+    # --- vendored recipes must still be the file they were taken from ----------
+    # Vendoring is what lets this CI build a tree without read access to the
+    # upstream repo, so the pin is the only thing keeping the copy from becoming a
+    # second, quietly different recipe. The copy is always checked against the
+    # pinned hash; upstream is checked too whenever its checkout is reachable (a
+    # dev box with the repos as siblings, or CI once the PAT covers that repo).
+    for p in rows:
+        vf = p.get("vendored_from")
+        if not vf:
+            continue
+        copy = os.path.normpath(os.path.join(HERE, os.pardir, vf["copy"]))
+        here = hashlib.sha256(open(copy, "rb").read()).hexdigest() if os.path.isfile(copy) else ""
+        ck("%s: vendored copy matches its pinned hash" % p["family"],
+           here == vf["sha256"],
+           "pinned=%s local=%s" % (vf["sha256"][:12], here[:12] or "MISSING"))
+        dirnames = [v["dir"] for v in c["repos"].values() if v["full_name"] == vf["repo"]]
+        # The dev box spells the sibling as <repo name>, CI clones it as the conf's
+        # `dir`, so both spellings are candidates at both root levels.
+        names = [vf["repo"].split("/")[-1]] + dirnames
+        candidates = [os.path.normpath(os.path.join(r, n, vf["path"]))
+                      for r in roots for n in names]
+        up = next((x for x in candidates if os.path.isfile(x)), None)
+        if up:
+            up_sha = hashlib.sha256(open(up, "rb").read()).hexdigest()
+            ck("%s: vendored copy still matches upstream" % p["family"],
+               up_sha == vf["sha256"],
+               "upstream=%s pinned=%s  (%s)" % (up_sha[:12], vf["sha256"][:12], up))
+        else:
+            print("NOTE  %s not readable here; upstream drift check skipped for %s"
+                  % (vf["repo"], p["family"]))
 
     # --- family templating -------------------------------------------------
     os.environ["MACOS_SDK_VER"] = "12.0"

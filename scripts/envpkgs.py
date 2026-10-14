@@ -293,6 +293,11 @@ def provenance(row):
             for n in row.get("repos", [])
         },
         "prepare": row["prepare"],
+        # For a family whose recipe is a vendored copy of another repo's script:
+        # which repo, which file, and the hash the copy was taken at. Without this
+        # the tree's provenance says "a script in this repo" and the reader cannot
+        # tell whether it still matches the upstream one.
+        "vendored_from": row.get("vendored_from"),
         # What the prepare step says it produced: resolved upstream commit, SDK
         # tarball digest, glibc floor, prep-script hash. This is the only record of
         # "which tree is this", because a family name cannot carry a sid snapshot.
