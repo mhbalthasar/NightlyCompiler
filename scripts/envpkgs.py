@@ -33,6 +33,7 @@ Modes read their secrets/config from env only, never argv, so a token cannot
 end up in a process list or in the step name GitHub echoes to the log.
 """
 import argparse
+import base64
 import datetime
 import glob
 import hashlib
@@ -154,10 +155,32 @@ def refs():
     return d
 
 
+def clone_env(pat):
+    """Env for a private clone. Two things the first CI run learned the hard way:
+
+    * GitHub's git-over-HTTPS endpoint does not accept `Authorization: Bearer
+      <PAT>` - it answers 401, git falls back to asking for a username, and a
+      runner has no terminal, so the step dies with "could not read Username".
+      Basic with any username and the token as password is what works, which is
+      exactly what actions/checkout sets up (its post-job cleanup unsets that
+      same extraheader).
+    * The header goes through GIT_CONFIG_* rather than `-c` on the command line,
+      so the credential is not in the process arguments that a traceback or a
+      `ps` snapshot can echo. base64 of a secret is not masked by Actions
+      either, so keeping it out of the visible command line matters.
+    """
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    if pat:
+        blob = base64.b64encode(("x-access-token:" + pat).encode()).decode()
+        env.update({"GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "http.extraHeader",
+                    "GIT_CONFIG_VALUE_0": "Authorization: Basic " + blob})
+    return env
+
+
 def cmd_clone(a):
     c = conf()
     names = list(c["repos"]) if a.all else json.loads(os.environ["PKG_JSON"]).get("repos", [])
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     pat = os.environ.get("CI_PAT_STRING", "").strip()
     for name in names:
         spec = c["repos"][name]
@@ -167,15 +190,9 @@ def cmd_clone(a):
             print("[envpkgs] %s already present, skipping clone" % dest)
             continue
         url = "https://github.com/%s.git" % spec["full_name"]
-        # The token rides on a per-invocation config value, never in the remote
-        # URL: a URL-embedded credential gets written into .git/config and then
-        # into any log line that echoes the remote.
-        cmd = ["git", "clone", "--depth", "1"]
-        if pat:
-            cmd += ["-c", "http.extraHeader=Authorization: Bearer " + pat]
-        cmd += ["--branch", ref, url, dest]
+        cmd = ["git", "clone", "--depth", "1", "--branch", ref, url, dest]
         print("[envpkgs] cloning %s @ %s -> %s" % (spec["full_name"], ref, dest))
-        p = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        p = subprocess.run(cmd, env=clone_env(pat), capture_output=True, text=True)
         if p.returncode != 0:
             raise SystemExit("[envpkgs] clone failed: %s\n%s" % (
                 spec["full_name"], _redact(pat, p.stderr)))
@@ -327,18 +344,27 @@ def next_version(family):
 # --------------------------------------------------------------------------
 # publish / prune
 # --------------------------------------------------------------------------
-def cmd_publish(a):
-    tag = conf()["release"]["tag"]
+def ensure_release():
+    """Create the rolling release if it is not there yet, and return its tag.
+    publish needs it to upload into, and prune needs it because `gh release edit`
+    on a cold repo fails with "release not found" - which is precisely the state
+    of the very first run, where prune executes after every build job."""
     r = conf()["release"]
-    path = os.environ["PKG_PATH"]
-    asset = os.path.basename(path)
-    if not os.path.isfile(path):
-        raise SystemExit("[envpkgs] nothing to publish at %s" % path)
+    tag = r["tag"]
     p = subprocess.run(["gh", "release", "view", tag], capture_output=True, text=True)
     if p.returncode != 0:
         print("[envpkgs] release %s does not exist yet - creating" % tag)
         gh("release", "create", tag, "--target", r["target"], "--title", r["title"],
            "--notes", r["notes"])
+    return tag
+
+
+def cmd_publish(a):
+    tag = ensure_release()
+    path = os.environ["PKG_PATH"]
+    asset = os.path.basename(path)
+    if not os.path.isfile(path):
+        raise SystemExit("[envpkgs] nothing to publish at %s" % path)
     # --clobber replaces a same-named asset; distinct version names mean a
     # rebuild never destroys the tree some other job just restored.
     gh("release", "upload", tag, path, "--clobber")
@@ -367,7 +393,7 @@ def split_asset(name):
 
 
 def cmd_prune(a):
-    tag = conf()["release"]["tag"]
+    tag = ensure_release()
     keep, superseded = select_survivors(assets_of(tag))
     for name, asset_id, _size, _updated in superseded:
         print("[envpkgs] pruning superseded asset %s" % name)
