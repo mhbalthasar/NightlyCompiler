@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# envpkg.sh - fetch a prebuilt environment package from NightlyCompiler's release.
+# envpkg.sh - fetch a prebuilt shared toolchain from NightlyCompiler's release.
 #
-# Build scripts here spend real time compiling things they do not depend on: a
-# LoongArch Hikari OLLVM, osxcross plus an Apple SDK, Debian sysroot trees. Those
-# live in NightlyCompiler's `envpkgs` release, published by its envpkgs_compiler
-# workflow after verifying each tree by extracting it and linking with it.
+# Build scripts here spend real time compiling the toolchains they build with:
+# a LoongArch-capable Hikari OLLVM, osxcross plus an Apple SDK. Those trees are
+# the same regardless of which repo consumes them, so they live in
+# NightlyCompiler's `envpkgs` release, published by its envpkgs_compiler workflow
+# after verifying each one by extracting the tree and linking with it.
+#
+# Debian sysroot trees are NOT in that release: every repo wants a different
+# package set in its sysroot, so those stay built by each repo's own
+# prepare_*_sysroot.sh against its own requirements.
 #
 # The order is always actions/cache -> this -> build from source. The cache stays
 # first: a hit is local and free, and this script only runs when it missed. Every

@@ -155,15 +155,17 @@ def main():
     os.environ.pop("MACOS_SDK_VER")
 
     # --- --only filtering --------------------------------------------------
-    ck("--only matches substrings", {r["family"] for r in envpkgs.package_rows(["dp-sysroot"])} ==
-       {f for f in published if f.startswith("dp-sysroot")})
-    ck("--only with several terms unions", len(envpkgs.package_rows(["ollvm", "opencyan-sysroot-loong64"])) == 2)
+    ck("--only matches substrings",
+       {r["family"] for r in envpkgs.package_rows(["ollvm"])} ==
+       {f for f in published if f.startswith("ollvm")})
+    ck("--only with several terms unions",
+       len(envpkgs.package_rows(["ollvm", "osxcross-macosx11.3-dp"])) == 2)
 
     # --- version selection and pruning -------------------------------------
     def asset(name, i=1, size=100):
         return (name, i, size, "2026-10-14T00:00:00Z")
 
-    fam = "dp-sysroot-arm64"
+    fam = "ollvm23-x86-loongarch-linux"
     keep, sup = envpkgs.select_survivors([
         asset(fam + "-v1.tar.xz"), asset(fam + "-v2.tar.xz"), asset(fam + "-v10.tar.xz"),
     ])
@@ -172,23 +174,29 @@ def main():
        sorted(k[0] for k in sup) == [fam + "-v1.tar.xz", fam + "-v2.tar.xz"], sup)
 
     keep, sup = envpkgs.select_survivors([
-        asset(fam + "-v1.tar.xz"), asset("ollvm23-x86-loongarch-linux-v3.tar.xz"),
-        asset("someone-elses-thing.zip"), asset("dp-sysroot-arm64-v4.tar.gz"),
+        asset(fam + "-v1.tar.xz"), asset("osxcross-macosx11.3-dp-v3.tar.xz"),
+        # A family the table no longer describes (sysroots were dropped as
+        # unshareable): its assets stay on the release, they are just not ours to
+        # prune. Deleting what we cannot describe is how a rename erases history.
+        asset("dp-sysroot-arm64-v4.tar.xz"), asset("someone-elses-thing.zip"),
+        asset(fam + "-vX.tar.xz"),
     ])
     names = sorted(k[0] for k in keep)
     ck("other families untouched", fam + "-v1.tar.xz" in names, names)
-    ck("unmanaged assets never pruned",
-       "someone-elses-thing.zip" in names and "dp-sysroot-arm64-v4.tar.gz" in names, names)
+    ck("assets this table does not describe are never pruned",
+       "someone-elses-thing.zip" in names and "dp-sysroot-arm64-v4.tar.xz" in names
+       and fam + "-vX.tar.xz" in names, names)
     ck("nothing superseded here", sup == [], sup)
 
     # `split_asset` is what decides whether prune dares to DELETE something.
     ck("split recognises managed name",
        envpkgs.split_asset(fam + "-v12.tar.xz") == (fam, 12))
     ck("split ignores a near-miss prefix",
-       envpkgs.split_asset(fam + "-arm64-v2.tar.xz") == (None, None),
-       envpkgs.split_asset(fam + "-arm64-v2.tar.xz"))
-    ck("split ignores non-numeric version",
-       envpkgs.split_asset(fam + "-vX.tar.xz") == (None, None))
+       envpkgs.split_asset(fam + "-linux-v2.tar.xz") == (None, None),
+       envpkgs.split_asset(fam + "-linux-v2.tar.xz"))
+    ck("split ignores a retired family",
+       envpkgs.split_asset("dp-sysroot-arm64-v4.tar.xz") == (None, None))
+    ck("split ignores non-numeric version", envpkgs.split_asset(fam + "-vX.tar.xz") == (None, None))
 
     # --- plan output shape (what the matrix consumes) ----------------------
     import tempfile

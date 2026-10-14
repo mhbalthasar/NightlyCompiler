@@ -1,14 +1,18 @@
 name: envpkgs-compiler
 
 # ============================================================================
-#  Pre-builds the environment packages the Daisium / Daisium_Predict /
-#  libOpenCyan build scripts otherwise COMPILE DURING a build, and publishes each
-#  one as an asset of the rolling `envpkgs` release in this repo.
+#  Pre-builds the SHARED toolchains the Daisium / Daisium_Predict / libOpenCyan
+#  build scripts otherwise COMPILE DURING a build, and publishes each one as an
+#  asset of the rolling `envpkgs` release in this repo: a LoongArch-capable
+#  Hikari OLLVM (hours) and osxcross with an Apple SDK (20-40 min). Consumers
+#  try, in order: actions/cache -> this release -> build from source.
 #
-#  What lands here is not build output - it is the toolchain the build output is
-#  made with: a source-built Hikari OLLVM for LoongArch (hours), osxcross + an
-#  Apple SDK (20-40 min), and Debian sysroot trees (download + unpack + post-fix).
-#  Consumers try, in order: actions/cache -> this release -> build from source.
+#  Debian sysroot trees are deliberately excluded. Each repo wants a different
+#  package set inside its sysroot - Daisium's carries libxml2/libicu/zlib and a
+#  cross gcc + binutils, Daisium_Predict's only the libc/libstdc++ pairs,
+#  libOpenCyan's a third selection - so one shared blob would mean freezing one
+#  repo's package list inside another's, which is the kind of copy that drifts.
+#  Those stay each repo's own step, using its own prepare_*_sysroot.sh.
 #
 #  Why a release instead of the cache they use today:
 #    * actions/cache evicts after 7 days, so a monthly build always pays full

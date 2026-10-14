@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-envpkgs.py - build, verify and publish the prebuilt build-environment packages.
+envpkgs.py - build, verify and publish the shared prebuilt toolchains.
 
 The three downstream repos (Daisium, Daisium_Predict, libOpenCyan) each spend
-part of every build run compiling the *toolchains* they build with: a
-source-built Hikari OLLVM for LoongArch, osxcross + an Apple SDK, and Debian
-sysroots. Those trees do not depend on the product sources, so rebuilding them
-per run buys nothing - and the only place they could live was actions/cache,
-which evicts after 7 days, is scoped per repo, and only saves on job success.
+part of every build run compiling the *toolchains they build with*: a
+source-built Hikari OLLVM for LoongArch, and osxcross with an Apple SDK. Those
+trees do not depend on the product sources, so rebuilding them per run buys
+nothing - and the only place they could live was actions/cache, which evicts
+after 7 days, is scoped per repo, and only saves on job success.
 
 This script turns that cache into a GitHub Release on this repo:
 
@@ -19,15 +19,22 @@ This script turns that cache into a GitHub Release on this repo:
   prune    : keep the highest version per family, drop the rest, refresh the
              release body
 
+Debian sysroot trees are deliberately NOT published here. Each repo's tree
+carries a different package set - Daisium's adds libxml2/libicu/zlib and a cross
+gcc + binutils, libOpenCyan's a third selection - so a shared blob would mean
+freezing one repo's package list inside another repo, which is the thing that
+drifts. They stay produced by each repo's own prepare_*_sysroot.sh, in its own
+job, against its own requirements.
+
 Verification runs against the extracted tarball and not against the build
 directory: the thing consumers restore is the tarball, and a tree that only
 works where it was built (absolute symlinks, wrappers that baked in their
 install path) is exactly the failure this job exists to prevent.
 
 Naming is by family, and a family name carries everything that changes the
-bytes (SDK version, target list, which repo's prep script produced the tree).
-Consumers ask for a family by name; they never compute keys. That is the same
-contract actions/cache gave them, with durable storage and no per-repo scope.
+bytes (SDK version, target list, which repo's recipe built it). Consumers ask for
+a family by name; they never compute keys. That is the same contract
+actions/cache gave them, with durable storage and no per-repo scope.
 
 Modes read their secrets/config from env only, never argv, so a token cannot
 end up in a process list or in the step name GitHub echoes to the log.

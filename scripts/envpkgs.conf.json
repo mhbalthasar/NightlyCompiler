@@ -1,26 +1,27 @@
 {
   "_comment": [
-    "Single source of truth for the prebuilt build-environment packages that",
-    "Daisium / Daisium_Predict / libOpenCyan CI otherwise compiles inside every",
-    "build run. `family` is the contract with the consumers: a CI step asks for one",
-    "family by name and gets the newest version this table produces. Changing a",
-    "family name means changing the consumer step that asks for it, so the name",
-    "carries everything that changes the bytes inside (SDK version, target list,",
-    "which repo's prep script produced the tree) and nothing that does not.",
+    "Single source of truth for the prebuilt environment packages that Daisium /",
+    "Daisium_Predict / libOpenCyan CI otherwise compiles inside every build run.",
+    "Only genuinely SHAREABLE toolchains belong here: a compiler fork and osxcross",
+    "with an Apple SDK, whose contents are decided by upstream commits, not by any",
+    "one consumer. Debian sysroot trees deliberately do NOT - each repo's carries a",
+    "different package set (Daisium's adds libxml2/libicu/zlib and a cross gcc,",
+    "libOpenCyan's a third set), so publishing one repo's tree for another to restore",
+    "would freeze someone else's package list here. Those stay produced by each",
+    "repo's own prepare_*_sysroot.sh in its own job.",
     "",
-    "Trees are NOT shareable across repos just because two paths look alike:",
-    "Daisium's sysroot carries libxml2/libicu/zlib and a cross gcc+binutils,",
-    "Daisium_Predict's carries only the libc/libstdc++ pairs, and libOpenCyan's",
-    "third package set again - hence one family per producing script.",
+    "`family` is the contract with the consumers: a CI step asks for one family by",
+    "name and gets the newest version this table produces. The name carries everything",
+    "that changes the bytes (SDK version, target list, which repo's recipe built it).",
     "",
-    "prepare/verify are run from this repo's workspace with the consumer checkouts",
-    "at the dirs named in `repos`. dest/markers use shell paths and glob patterns."
+    "prepare/verify run from this repo's workspace with the checkouts named in",
+    "`repos` cloned alongside it. dest/markers use shell paths and glob patterns."
   ],
   "release": {
     "tag": "envpkgs",
     "title": "Prebuilt build-environment packages",
     "target": "main",
-    "notes": "Toolchain trees that the Daisium / Daisium_Predict / libOpenCyan build scripts otherwise compile from source during a build. Consumed by those repos' CI through compile_scripts/tools/envpkg.sh, between actions/cache and the source build. Rebuilt on demand by .github/workflows/envpkgs_compiler.yaml; each asset carries .envpkg.json with the upstream commits, digests and glibc floor it was built from."
+    "notes": "Shared toolchains that the Daisium / Daisium_Predict / libOpenCyan build scripts otherwise compile from source during a build. Consumed by those repos' CI through compile_scripts/tools/envpkg.sh, between actions/cache and the source build. Rebuilt on demand by .github/workflows/envpkgs_compiler.yaml; each asset carries .envpkg.json with the upstream commits, SDK digests and toolchain version it was built from. Debian sysroot trees are intentionally not published here - each repo needs a different package set inside its sysroot."
   },
   "repos": {
     "dp": {
@@ -43,11 +44,18 @@
       "runner": "ubuntu-24.04",
       "timeout_minutes": 480,
       "free_disk": true,
-      "repos": ["dp"],
+      "repos": [
+        "dp"
+      ],
       "dest": "$HOME/tools/ollvm-built",
       "prepare": "bash scripts/envpkg/build_ollvm_loongarch.sh",
       "verify": "scripts/envpkg/verify_ollvm_loongarch.sh",
-      "markers": ["bin/clang", "bin/clang++", "bin/lld", "lib/clang/*/include/stddef.h"]
+      "markers": [
+        "bin/clang",
+        "bin/clang++",
+        "bin/lld",
+        "lib/clang/*/include/stddef.h"
+      ]
     },
     {
       "family": "osxcross-macosx11.3-dp",
@@ -55,12 +63,20 @@
       "runner": "ubuntu-24.04",
       "timeout_minutes": 180,
       "free_disk": true,
-      "repos": ["dp"],
+      "repos": [
+        "dp"
+      ],
       "dest": "$HOME/tools/osxcross/target",
       "prepare": "bash scripts/envpkg/build_osxcross_dp.sh",
       "verify": "scripts/envpkg/verify_osxcross.sh",
-      "verify_env": {"EXPECT_DARWIN": "20.4"},
-      "markers": ["bin/x86_64-apple-darwin20.4-clang", "bin/arm64-apple-darwin20.4-clang", "SDK/MacOSX11.3.sdk"]
+      "verify_env": {
+        "EXPECT_DARWIN": "20.4"
+      },
+      "markers": [
+        "bin/x86_64-apple-darwin20.4-clang",
+        "bin/arm64-apple-darwin20.4-clang",
+        "SDK/MacOSX11.3.sdk"
+      ]
     },
     {
       "family": "osxcross-macosx{macos_sdk_ver}-opencyan",
@@ -68,143 +84,17 @@
       "runner": "ubuntu-24.04",
       "timeout_minutes": 180,
       "free_disk": true,
-      "repos": ["opencyan"],
+      "repos": [
+        "opencyan"
+      ],
       "dest": "$HOME/osxcross-target",
       "prepare": "bash scripts/envpkg/build_osxcross_opencyan.sh",
       "verify": "scripts/envpkg/verify_osxcross.sh",
-      "markers": ["bin/x86_64-apple-darwin*-clang", "bin/arm64-apple-darwin*-clang", "SDK/MacOSX{macos_sdk_ver}.sdk"]
-    },
-    {
-      "family": "daisium-sysroot-x86_64",
-      "desc": "Debian buster amd64 sysroot (glibc 2.28 floor) + libxml2/libicu/zlib dev, produced by Daisium's prepare_x86_64_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["daisium"],
-      "dest": "$HOME/tools/sysroots/x86_64/root",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh daisium x86_64",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "x86_64-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o"]
-    },
-    {
-      "family": "daisium-sysroot-i386",
-      "desc": "Debian buster i386 sysroot (glibc 2.28 floor) + libxml2/libicu/zlib dev, produced by Daisium's prepare_i386_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["daisium"],
-      "dest": "$HOME/tools/sysroots/i386/root",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh daisium i386",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "i386-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o"]
-    },
-    {
-      "family": "daisium-sysroot-arm64",
-      "desc": "Debian sid arm64 sysroot + libxml2/zlib dev + aarch64 cross gcc/binutils, produced by Daisium's prepare_aarch64_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["daisium"],
-      "dest": "$HOME/tools/sysroots/aarch64/root",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh daisium aarch64",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "aarch64-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o"]
-    },
-    {
-      "family": "daisium-sysroot-loongarch64",
-      "desc": "Debian sid loong64 sysroot + libxml2/zlib dev + loongarch64 cross gcc/binutils, produced by Daisium's prepare_loongarch64_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["daisium"],
-      "dest": "$HOME/tools/sysroots/loongarch64/root",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh daisium loongarch64",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "loongarch64-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o"]
-    },
-    {
-      "family": "dp-sysroot-x86_64",
-      "desc": "Debian buster amd64 sysroot (glibc 2.28 floor), produced by Daisium_Predict's prepare_x86_64_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["dp"],
-      "dest": "$HOME/tools/sysroots/x86_64/root",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh dp x86_64",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "x86_64-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o"]
-    },
-    {
-      "family": "dp-sysroot-i386",
-      "desc": "Debian buster i386 sysroot (glibc 2.28 floor), produced by Daisium_Predict's prepare_i386_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["dp"],
-      "dest": "$HOME/tools/sysroots/i386/root",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh dp i386",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "i386-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o"]
-    },
-    {
-      "family": "dp-sysroot-arm64",
-      "desc": "Debian sid arm64 sysroot (libc/libstdc++/libgcc pairs), produced by Daisium_Predict's prepare_aarch64_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["dp"],
-      "dest": "$HOME/tools/sysroots/aarch64/root",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh dp aarch64",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "aarch64-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o"]
-    },
-    {
-      "family": "dp-sysroot-loongarch64",
-      "desc": "Debian sid loong64 sysroot (libc/libstdc++/libgcc pairs), produced by Daisium_Predict's prepare_loongarch64_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["dp"],
-      "dest": "$HOME/tools/sysroots/loongarch64/root",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh dp loongarch64",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "loongarch64-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o"]
-    },
-    {
-      "family": "opencyan-sysroot-i386",
-      "desc": "Debian sid i386 sysroot for i686-unknown-linux-gnu, produced by libOpenCyan's prepare_debian_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["opencyan"],
-      "dest": "$HOME/sysroot-i386",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh opencyan i386",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "i386-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o", "lib"]
-    },
-    {
-      "family": "opencyan-sysroot-arm64",
-      "desc": "Debian sid arm64 sysroot for aarch64-unknown-linux-gnu, produced by libOpenCyan's prepare_debian_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["opencyan"],
-      "dest": "$HOME/sysroot-arm64",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh opencyan arm64",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "aarch64-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o", "lib"]
-    },
-    {
-      "family": "opencyan-sysroot-loong64",
-      "desc": "Debian sid loong64 sysroot for loongarch64-unknown-linux-gnu, produced by libOpenCyan's prepare_debian_sysroot.sh",
-      "runner": "ubuntu-24.04",
-      "timeout_minutes": 90,
-      "repos": ["opencyan"],
-      "dest": "$HOME/sysroot-loong64",
-      "prepare": "bash scripts/envpkg/build_sysroot.sh opencyan loong64",
-      "verify": "scripts/envpkg/verify_sysroot.sh",
-      "verify_env": {"TARGET_TRIPLE": "loongarch64-linux-gnu"},
-      "markers": ["usr/include/stdio.h", "usr/lib/*/libc.so.6", "usr/lib/*/crt1.o", "lib64"]
+      "markers": [
+        "bin/x86_64-apple-darwin*-clang",
+        "bin/arm64-apple-darwin*-clang",
+        "SDK/MacOSX{macos_sdk_ver}.sdk"
+      ]
     }
   ]
 }
