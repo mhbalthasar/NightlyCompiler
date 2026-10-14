@@ -39,6 +39,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -178,27 +179,70 @@ def clone_env(pat):
     return env
 
 
+def clone_status_path():
+    return os.path.join("dist", "clone-status.json")
+
+
+def record_clone(name, state):
+    """Remember why a checkout is or is not here. `stage` and the table test read
+    this to tell "the token cannot reach that repo" (skip, say so) from "the clone
+    broke for some other reason" (fail) - and to keep a repo that was never
+    fetched from turning a contract check into a silent no-op."""
+    p = clone_status_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    d = {}
+    if os.path.isfile(p):
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+        except ValueError:
+            d = {}
+    d[name] = state
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(d, fh, indent=2, sort_keys=True)
+
+
 def cmd_clone(a):
     c = conf()
     names = list(c["repos"]) if a.all else json.loads(os.environ["PKG_JSON"]).get("repos", [])
     pat = os.environ.get("CI_PAT_STRING", "").strip()
+    blocked = []
     for name in names:
         spec = c["repos"][name]
         dest = spec["dir"]
         ref = refs().get(name, "main")
         if os.path.isdir(dest):
             print("[envpkgs] %s already present, skipping clone" % dest)
+            record_clone(name, "ok")
             continue
         url = "https://github.com/%s.git" % spec["full_name"]
         cmd = ["git", "clone", "--depth", "1", "--branch", ref, url, dest]
         print("[envpkgs] cloning %s @ %s -> %s" % (spec["full_name"], ref, dest))
         p = subprocess.run(cmd, env=clone_env(pat), capture_output=True, text=True)
         if p.returncode != 0:
+            # 403 is a scope answer, not a build failure: a fine-grained PAT lists
+            # the repositories it may read, and one left out answers 403. Treat it
+            # as "this package cannot be produced here", warn, and let stage skip
+            # the packages that need it - the ones the token CAN reach still build
+            # and publish in the same run.
+            #
+            # 401 and "could not read Username" are NOT the same case: a rejected
+            # or missing credential means this repo's setup is broken, and every
+            # package would silently "skip" to a green run that publishes nothing.
+            err = p.stderr
+            if re.search(r"error: 403|permission denied", err, re.I):
+                print("::warning::[envpkgs] no read access to %s - packages built "
+                      "from its scripts will be skipped" % spec["full_name"])
+                record_clone(name, "no-access")
+                blocked.append(spec["full_name"])
+                continue
             raise SystemExit("[envpkgs] clone failed: %s\n%s" % (
-                spec["full_name"], _redact(pat, p.stderr)))
+                spec["full_name"], _redact(pat, err)))
+        record_clone(name, "ok")
         sha = subprocess.run(["git", "-C", dest, "rev-parse", "HEAD"],
                              capture_output=True, text=True).stdout.strip()
         print("[envpkgs] %s @ %s" % (dest, sha[:12]))
+    if blocked:
+        print("[envpkgs] unreachable repos: %s" % ", ".join(blocked))
 
 
 # --------------------------------------------------------------------------
@@ -253,6 +297,19 @@ def provenance(row):
 
 def cmd_stage(a):
     row = json.loads(os.environ["PKG_JSON"])
+    out = a.outputs or os.environ.get("GITHUB_OUTPUT", "")
+    missing = [n for n in row.get("repos", [])
+               if not os.path.isdir(conf()["repos"][n]["dir"])]
+    if missing:
+        # The tree is produced by that repo's own prep script, and the script is
+        # not copied here on purpose - so without the checkout there is nothing
+        # honest to build. Say which repo and which package, and let the run go on.
+        print("::warning::[envpkgs] skipping %s: needs the %s checkout (not readable "
+              "with this token)" % (row["family"], ", ".join(missing)))
+        if out:
+            emit(out, "asset", "")
+            emit(out, "skipped", ",".join(missing))
+        return
     dest = resolve_dest(row["dest"])
     os.makedirs("dist", exist_ok=True)
     # Hand the prepare steps their paths instead of letting each script re-derive
@@ -307,7 +364,6 @@ def cmd_stage(a):
 
     size = os.path.getsize(path)
     digest = sha256(path)
-    out = a.outputs or os.environ.get("GITHUB_OUTPUT", "")
     if out:
         emit(out, "asset", asset)
         emit(out, "path", path)

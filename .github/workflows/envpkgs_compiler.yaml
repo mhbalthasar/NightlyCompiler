@@ -182,6 +182,9 @@ jobs:
         run: python3 scripts/envpkgs.py stage
 
       - name: Publish to release
+        # Empty when stage skipped the package (its repo's scripts are not
+        # readable with this token) - see scripts/envpkgs.py cmd_stage.
+        if: ${{ steps.stage.outputs.asset != '' }}
         env:
           PKG_PATH: ${{ steps.stage.outputs.path }}
         run: python3 scripts/envpkgs.py publish
