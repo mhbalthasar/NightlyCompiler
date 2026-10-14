@@ -174,17 +174,25 @@ ck "info without family -> exit 2"    "$(usage_rc info)"
 ck "restore without dest -> exit 2"   "$(usage_rc restore "$FAM")"
 
 # --- the copies in the consumer repos must not have drifted ------------------
+# A copy that is not there yet is rollout state, not drift: NightlyCompiler's CI
+# can legitimately run before those repos carry the file. Once a copy exists it is
+# compared strictly - divergence is how three near-identical helpers rot.
 echo "=== copies in consumer repos ==="
 want="$(sha256sum "$HELPER" | cut -d' ' -f1)"
-for rel in ../../Daisium ../../Daisium_Predict ../../libOpenCyan; do
-  p="$(cd "$HERE/$rel" 2>/dev/null && pwd)/compile_scripts/tools/envpkg.sh"
-  if [ -f "$p" ]; then
-    got="$(sha256sum "$p" | cut -d' ' -f1)"
-    ck "$(basename "$rel") copy identical" "$([ "$got" = "$want" ] && echo 0 || echo 1)" "$p"
-  else
-    fail "$(basename "$rel") copy missing" "$p"
-  fi
+present=0
+for rel in ../../Daisium/compile_scripts/tools/envpkg.sh \
+           ../../Daisium_Predict/compile_scripts/tools/envpkg.sh \
+           ../../libOpenCyan/compile_scripts/tools/envpkg.sh \
+           ../daisium/compile_scripts/tools/envpkg.sh \
+           ../dp/compile_scripts/tools/envpkg.sh \
+           ../opencyan/compile_scripts/tools/envpkg.sh; do
+  p="$(cd "$HERE/$(dirname "$rel")" 2>/dev/null && pwd)/$(basename "$rel")"
+  [ -f "$p" ] || continue
+  present=$((present + 1))
+  got="$(sha256sum "$p" | cut -d' ' -f1)"
+  ck "copy identical: $rel" "$([ "$got" = "$want" ] && echo 0 || echo 1)" "$p"
 done
+[ "$present" = 0 ] && echo "NOTE  no consumer copy of envpkg.sh exists yet (rollout pending)"
 
 echo
 if [ "$fails" = 0 ]; then echo "all checks passed"; exit 0; fi
