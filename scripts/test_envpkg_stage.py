@@ -144,9 +144,8 @@ def main():
         ck("verify pointed at a fresh extraction dir",
            rec.get("dir") and rec["dir"] != base, rec)
         ck("verify_env reached the verify step", rec.get("forwarded") == "forwarded", rec)
-        ck("verify got the tree path as its argument", rec.get("first", "").startswith(rec["dir"][:3]), rec)
-        ck("symlink survived pack -> unpack -> relocate",
-           os.path.islink(os.path.join(rec.get("dir", "/nonexistent"), "lib")), rec)
+        ck("verify got the tree path as its argument",
+           rec.get("first", "").startswith(rec["dir"][:3]), rec)
     else:
         ck("verify step ran at all", False, log)
 
@@ -159,6 +158,15 @@ def main():
         ex = os.path.join(w, "peek")
         os.makedirs(ex)
         subprocess.run("xz -dc %s | tar -xf - -C %s" % (dist, ex), shell=True, check=True)
+        # Checked against THIS extraction: stage removes its own verify directory
+        # when it finishes, so asking whether a path under it is a symlink would
+        # just be asking whether a deleted directory is a symlink.
+        ck("symlink survived pack -> unpack -> relocate",
+           os.path.islink(os.path.join(ex, "lib")) and
+           os.path.realpath(os.path.join(ex, "lib", "triplet", "libc.so.6")) ==
+           os.path.realpath(os.path.join(ex, "usr", "lib", "triplet", "libc.so.6")),
+           "lib -> %s" % (os.readlink(os.path.join(ex, "lib"))
+                          if os.path.islink(os.path.join(ex, "lib")) else "NOT A SYMLINK"))
         meta = json.load(open(os.path.join(ex, ".envpkg.json"), encoding="utf-8"))
         ck("pins from ENVPKG_PINS merged into provenance",
            meta.get("pins", {}).get("glibc_floor") == "GLIBC_2.28", meta)
