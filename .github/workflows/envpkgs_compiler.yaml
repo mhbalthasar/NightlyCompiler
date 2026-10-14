@@ -1,0 +1,205 @@
+name: envpkgs-compiler
+
+# ============================================================================
+#  Pre-builds the environment packages the Daisium / Daisium_Predict /
+#  libOpenCyan build scripts otherwise COMPILE DURING a build, and publishes each
+#  one as an asset of the rolling `envpkgs` release in this repo.
+#
+#  What lands here is not build output - it is the toolchain the build output is
+#  made with: a source-built Hikari OLLVM for LoongArch (hours), osxcross + an
+#  Apple SDK (20-40 min), and Debian sysroot trees (download + unpack + post-fix).
+#  Consumers try, in order: actions/cache -> this release -> build from source.
+#
+#  Why a release instead of the cache they use today:
+#    * actions/cache evicts after 7 days, so a monthly build always pays full
+#      price; release assets persist.
+#    * the cache is per-repository, so Daisium, Daisium_Predict and libOpenCyan
+#      each rebuild the same OLLVM and the same osxcross separately.
+#    * a cache is only saved when the job succeeds - the run that dies after
+#      spending two hours on clang throws the toolchain away too.
+#    * this repo is public, so consumers fetch over anonymous HTTPS and need no
+#      token and no new secret.
+#  The blob itself never expires, so re-running this workflow leaves the old
+#  version until `prune` drops it; nothing accumulates unbounded.
+#
+#  The package list lives in scripts/envpkgs.conf.json, not in this file: seven
+#  near-identical jobs is exactly the "same thing written seven times, one
+#  edited" failure mode this repo already documents. A row says which family it
+#  publishes, which runner it needs, which consumer checkouts its prepare step
+#  shells into, where the tree ends up, and how to prove the tree is usable.
+#
+#  Verification is the part that earns the storage. After packing, the tarball is
+#  extracted to a fresh directory and the consumer-side checks run against THAT:
+#  sysroots have to link a binary for their arch, osxcross has to compile and link
+#  Mach-O for both arches from wherever it was unpacked, OLLVM has to accept
+#  Hikari's passes and cross-link LoongArch. A tree that only works where it was
+#  built (absolute symlinks, wrappers with their install path baked in) fails here
+#  instead of quietly costing nine jobs at the bottom of a build matrix.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Substrings of family names to (re)build; blank = every package in the table"
+        required: false
+        default: ""
+      macos_sdk_ver:
+        description: "macOS SDK for the opencyan osxcross family (the dp family pins 11.3 in its name)"
+        required: false
+        default: "11.3"
+      dp_ref:
+        description: "Daisium_Predict branch/tag whose prepare scripts produce the dp-* trees"
+        required: false
+        default: "main"
+      daisium_ref:
+        description: "Daisium branch/tag whose prepare scripts produce the daisium-* trees"
+        required: false
+        default: "main"
+      opencyan_ref:
+        description: "libOpenCyan branch/tag whose tools produce the opencyan-* trees"
+        required: false
+        default: "main"
+      ollvm_rev:
+        description: "ollvm-clang branch/commit for the LoongArch build"
+        required: false
+        default: "clang23"
+      osxcross_rev:
+        description: "osxcross branch/commit"
+        required: false
+        default: "master"
+
+env:
+  # Read by scripts/envpkgs.py in every job. Family names are templated from
+  # MACOS_SDK_VER, so plan and build must see the same value or a consumer would
+  # ask for a family this run never published - hence workflow env, not per-job.
+  MACOS_SDK_VER: ${{ inputs.macos_sdk_ver || '11.3' }}
+  OLLVM_REV: ${{ inputs.ollvm_rev || 'clang23' }}
+  OSXCROSS_REV: ${{ inputs.osxcross_rev || 'master' }}
+  ENVPKG_REFS: >-
+    dp=${{ inputs.dp_ref || 'main' }},daisium=${{ inputs.daisium_ref || 'main' }},opencyan=${{ inputs.opencyan_ref || 'main' }}
+
+# Release assets are created and deleted through the default token.
+permissions:
+  contents: write
+
+concurrency:
+  group: envpkgs
+  # Never auto-cancel: an interrupted job leaves a half-uploaded asset that
+  # consumers may then prefer over building from source.
+  cancel-in-progress: false
+
+jobs:
+  selftest:
+    # Runs before anything is built. Two of these three tests are only executable
+    # on a POSIX runner (stage mixes bash-expanded paths with python file calls),
+    # and the third checks the package table against the CI steps of the three
+    # consuming repos - which needs those repos, and is the check that catches a
+    # renamed family long before a consumer silently falls back to compiling.
+    name: table and packer self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI_PAT_STRING: ${{ secrets.CI_PAT_STRING }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone consumer repos
+        run: python3 scripts/envpkgs.py clone --all
+
+      - name: Package table, family contract, version pruning
+        run: python3 scripts/test_envpkgs_table.py
+
+      - name: Stage pipeline against a fake package
+        run: python3 scripts/test_envpkg_stage.py
+
+      - name: Consumer fetch helper (curl- and tar-level behaviour)
+        run: bash scripts/test_envpkg_restore.sh
+
+  plan:
+    name: read package table
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Plan
+        id: plan
+        # Input goes through env, not into the command line: `only` is free text a
+        # caller types in the dispatch form, and interpolating it into a shell
+        # command would let a semicolon run arbitrary code on the runner.
+        env:
+          ONLY: ${{ inputs.only }}
+        run: python3 scripts/envpkgs.py plan --only "$ONLY"
+
+  build:
+    needs: [plan, selftest]
+    # One job per package row. `pkg` is the whole row, handed to the stages as
+    # JSON (same trick daisium_predict_compiler.yaml uses for UNIT_JSON) so the
+    # python side owns every path and command and the YAML stays generic.
+    name: ${{ matrix.family }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      PKG_JSON: ${{ toJSON(matrix.pkg) }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CI_PAT_STRING: ${{ secrets.CI_PAT_STRING }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # cmake+ninja build OLLVM; clang is what osxcross compiles cctools/ld64
+      # with; clang+lld-18 in the image are what the sysroot verification links
+      # test trees with, on the host, for every arch including LoongArch.
+      # dpkg-deb and ar come with the base image and the consumer prep scripts
+      # need them, so they are checked rather than installed.
+      - name: Install host toolchain
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y cmake ninja-build curl xz-utils clang lld llvm file
+          for t in cmake ninja clang ld.lld dpkg-deb ar tar xz; do
+            command -v "$t" >/dev/null || { echo "::error::$t missing on this runner" >&2; exit 1; }
+          done
+
+      # ubuntu-24.04 gives ~14 GB of usable disk; an LLVM build tree plus its
+      # install prefix plus the packed tarball does not fit in that next to the
+      # Android/CodeQL payloads no job here uses. Only the compiler builds ask.
+      - name: Free disk (compiler builds)
+        if: ${{ matrix.pkg.free_disk }}
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1
+
+      - name: Clone consumer repos
+        run: python3 scripts/envpkgs.py clone
+
+      - name: Stage and verify
+        id: stage
+        run: python3 scripts/envpkgs.py stage
+
+      - name: Publish to release
+        env:
+          PKG_PATH: ${{ steps.stage.outputs.path }}
+        run: python3 scripts/envpkgs.py publish
+
+      # Nothing is kept on the runner between steps and nothing goes through
+      # artifacts - the release is the only storage this workflow uses.
+      - name: Show release state
+        run: gh release view envpkgs --json assets -q '.assets[] | "\(.name)  \(.size)  \(.updatedAt)"'
+  prune:
+    needs: [plan, build]
+    # A failed package must not strand the ones that succeeded, and the release
+    # body has to be regenerated even when nothing was rebuilt this run.
+    if: always() && !cancelled()
+    name: prune superseded packages
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prune and refresh release body
+        run: python3 scripts/envpkgs.py prune
