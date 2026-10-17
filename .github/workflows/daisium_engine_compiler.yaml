@@ -135,7 +135,7 @@ jobs:
     if: needs.plan.outputs.layer0 != '[]'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on }}
-    timeout-minutes: ${{ matrix.timeout || 360 }}
+    timeout-minutes: ${{ fromJSON(matrix.timeout || '360') }}
     strategy:
       fail-fast: false
       matrix:
@@ -229,7 +229,7 @@ jobs:
     if: always() && !failure() && !cancelled() && needs.plan.outputs.layer1 != '[]'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on }}
-    timeout-minutes: ${{ matrix.timeout || 360 }}
+    timeout-minutes: ${{ fromJSON(matrix.timeout || '360') }}
     strategy:
       fail-fast: false
       matrix:
@@ -304,7 +304,7 @@ jobs:
     if: always() && !failure() && !cancelled() && needs.plan.outputs.layer2 != '[]'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on }}
-    timeout-minutes: ${{ matrix.timeout || 360 }}
+    timeout-minutes: ${{ fromJSON(matrix.timeout || '360') }}
     strategy:
       fail-fast: false
       matrix:
