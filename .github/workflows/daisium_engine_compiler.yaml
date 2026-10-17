@@ -9,12 +9,12 @@ name: daisium-engine-nightly-compiler
 #  minutes).  Adding a target to build.yml appears here on the next run; no
 #  build command is copied into this file.
 #
-#  Daisium's build.yml already runs every job on [self-hosted, linux, x64],
-#  including the Windows MSVC trio (clang-cl + xwin), MinGW, Linux
-#  x64/x86/arm64/loong64, macOS (osxcross) and the AnyCPU wrapper.  This
-#  dispatcher overrides runs-on to ubuntu-24.04 so the same matrix runs on
-#  GitHub-hosted Linux instead of the private repo's runner.  The selected ref
-#  must carry compile_scripts/build.winmsvc-linux.sh and
+#  Daisium's build.yml is parsed at run time and its jobs run here with
+#  runs-on forced to ubuntu-24.04 (GitHub-hosted Linux) instead of the private
+#  repo's runner.  The Windows branch is MinGW by default; windows_builder=msvc
+#  selects the clang-cl + xwin trio instead (the two are mutually exclusive).
+#  An msvc run needs the selected ref to carry
+#  compile_scripts/build.winmsvc-linux.sh and
 #  compile_scripts/tools/prepare_xwin.sh; main does.
 #
 #  First-run tip: run envpkgs_compiler.yaml once so the LoongArch-capable OLLVM
@@ -49,6 +49,14 @@ on:
         options:
           - artifacts
           - s3
+      windows_builder:
+        description: "Windows branch: mingw (release mainline) or msvc (opt-in, mutually exclusive)"
+        required: false
+        default: "mingw"
+        type: choice
+        options:
+          - mingw
+          - msvc
 
 env:
   DAISIUM_REPO: "mhbalthasar/Daisium"
@@ -126,6 +134,7 @@ jobs:
           --ci dp/.github/workflows/build.yml
           --ref "${{ inputs.ref }}"
           --input obfuscation_level="${{ inputs.obfuscation_level }}"
+          --input windows_builder="${{ inputs.windows_builder }}"
           --repo-dir dp
           --runner ubuntu-24.04
           --s3-prefix "${{ steps.s3-prefix.outputs.s3_prefix }}"
