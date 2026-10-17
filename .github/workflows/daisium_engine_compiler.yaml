@@ -1,0 +1,375 @@
+name: daisium-engine-nightly-compiler
+
+# ============================================================================
+#  Dynamic bootstrap for the private Daisium repo (mhbalthasar/Daisium).
+#
+#  Daisium's build.yml is the single source of truth: job list, matrix,
+#  toolchain steps, build commands and upload names/paths are read at run time
+#  and executed inside THIS public repo's Actions space (our runners / our
+#  minutes).  Adding a target to build.yml appears here on the next run; no
+#  build command is copied into this file.
+#
+#  Daisium's build.yml already runs every job on [self-hosted, linux, x64],
+#  including the Windows MSVC trio (clang-cl + xwin), MinGW, Linux
+#  x64/x86/arm64/loong64, macOS (osxcross) and the AnyCPU wrapper.  This
+#  dispatcher overrides runs-on to ubuntu-24.04 so the same matrix runs on
+#  GitHub-hosted Linux instead of the private repo's runner.  The selected ref
+#  must carry compile_scripts/build.winmsvc-linux.sh and
+#  compile_scripts/tools/prepare_xwin.sh; main does.
+#
+#  First-run tip: run envpkgs_compiler.yaml once so the LoongArch-capable OLLVM
+#  is published as an envpkgs release asset.  build.yml tries actions/cache ->
+#  envpkgs -> source build; the source build alone can approach the 6-hour job
+#  limit, while the published tree restores in minutes.
+#
+#  upload_backend=s3 swaps only the transport for build outputs: the same trees
+#  go to s3://$TIGRIS_BUCKET/Daisium/build-s3/<run>/<attempt>/<name>/ and no
+#  artifact is created.  The artifacts option leaves every upload step on the
+#  stock actions/upload-artifact path.  S3 mode needs the four TIGRIS_* repo
+#  secrets; objects do not expire on their own, so keep a lifecycle rule on the
+#  build-s3/ prefix.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Daisium branch / tag to build"
+        required: false
+        default: "main"
+      obfuscation_level:
+        description: "OLLVM obfuscation level (1-3, 0=off) - forwarded to build.yml"
+        required: false
+        default: "2"
+      upload_backend:
+        description: "s3 = Tigris S3, no artifacts (default); artifacts = Actions artifacts"
+        required: false
+        default: "s3"
+        type: choice
+        options:
+          - artifacts
+          - s3
+
+env:
+  DAISIUM_REPO: "mhbalthasar/Daisium"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daisium-engine-nightly
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: parse Daisium build.yml
+    runs-on: ubuntu-24.04
+    outputs:
+      layer0: ${{ steps.plan.outputs.layer0 }}
+      layer1: ${{ steps.plan.outputs.layer1 }}
+      layer2: ${{ steps.plan.outputs.layer2 }}
+      # Empty in artifacts mode. Carried as a plan output rather than workflow
+      # env so the target repo name is derived once from DAISIUM_REPO instead of
+      # being repeated in three jobs.
+      s3_prefix: ${{ steps.s3-prefix.outputs.s3_prefix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DAISIUM_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.CI_PAT_STRING }}
+          path: dp
+
+      # Fail in the plan job, not a dozen matrix jobs later, when the selected
+      # ref does not have the all-Linux MSVC cross flow.  main does; a tag or
+      # older branch that still uses build.win64.ps1 cannot run here.
+      - name: Require the Linux MSVC cross flow
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          test -f dp/compile_scripts/build.winmsvc-linux.sh || {
+            echo "::error::ref '$REF' has no compile_scripts/build.winmsvc-linux.sh" >&2
+            echo "::error::use a ref with the all-Linux flow (main does)" >&2
+            exit 1
+          }
+          test -f dp/compile_scripts/tools/prepare_xwin.sh
+
+      - name: Ensure PyYAML
+        run: python3 -c "import yaml" || python3 -m pip install --user --break-system-packages pyyaml
+
+      # Computed before plan so build.yml's `needs.init.outputs.s3_prefix`
+      # conditions resolve to the real backend (the init job itself has no
+      # upload step, so the runner never plans it).
+      - name: S3 prefix
+        id: s3-prefix
+        env:
+          BACKEND: ${{ inputs.upload_backend }}
+          REPO: ${{ env.DAISIUM_REPO }}
+        run: |
+          if [ "$BACKEND" = "s3" ]; then
+            # run + attempt scoped: re-running a run never overwrites the last
+            # attempt, so the two rounds can still be compared side by side.
+            # First segment is the target repo name, matching the
+            # Daisium_Predict / libOpenCyan bucket layout.
+            echo "s3_prefix=${REPO#*/}/build-s3/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          else
+            echo "s3_prefix=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Plan
+        id: plan
+        run: >
+          python3 scripts/daisium_ci_runner.py plan
+          --ci dp/.github/workflows/build.yml
+          --ref "${{ inputs.ref }}"
+          --input obfuscation_level="${{ inputs.obfuscation_level }}"
+          --repo-dir dp
+          --runner ubuntu-24.04
+          --s3-prefix "${{ steps.s3-prefix.outputs.s3_prefix }}"
+
+  build-l0:
+    needs: plan
+    if: needs.plan.outputs.layer0 != '[]'
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: ${{ matrix.timeout || 360 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.layer0) }}
+    env:
+      UNIT_JSON: ${{ toJSON(matrix) }}
+      DP_REPO_DIR: dp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DAISIUM_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.CI_PAT_STRING }}
+          path: dp
+
+      # The LoongArch OLLVM source build is the only unit that can approach the
+      # 6-hour limit and needs a lot of scratch space.  The published envpkg is
+      # the fast path; this is the fallback's safety margin.
+      - name: Free disk (LoongArch OLLVM source build)
+        if: matrix.job == 'linux-loong64'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+
+      # build.yml's own `actions/cache` steps are restored here with the real
+      # action (blob I/O / chunking / eviction stay upstream). The runner then
+      # skips whatever build.yml gated behind `cache-hit != 'true'`.
+      - name: Restore build.yml cache
+        id: dp-cache
+        if: matrix.cache.key != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.cache.paths_joined }}
+          key: ${{ matrix.cache.key }}
+          restore-keys: ${{ matrix.cache.restore_keys }}
+
+      # build.yml already installs awscli in most jobs, but a ref that does not
+      # must still be able to upload to S3.  Idempotent and skipped in artifacts
+      # mode.
+      - name: Ensure aws CLI (S3 backend)
+        if: needs.plan.outputs.s3_prefix != ''
+        run: |
+          command -v aws >/dev/null 2>&1 || {
+            sudo apt-get update -y
+            sudo apt-get install -y awscli
+          }
+
+      - name: Execute build.yml steps
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DP_CACHE_STEP_ID: ${{ matrix.cache.step_id }}
+          DP_CACHE_HIT: ${{ steps.dp-cache.outputs.cache-hit }}
+          # Empty in artifacts mode, so exec-unit keeps taking the original
+          # artifacts REST path unchanged; non-empty redirects the cross-job
+          # download to the same run's S3 prefixes.
+          DP_S3_PREFIX: ${{ needs.plan.outputs.s3_prefix }}
+          BUCKET: ${{ secrets.TIGRIS_BUCKET }}
+          S3_URL: ${{ secrets.TIGRIS_S3_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_SECRET_ACCESS_KEY }}
+        run: python3 scripts/daisium_ci_runner.py exec-unit
+
+      - name: Upload build outputs
+        if: ${{ matrix.upload.name != '' && needs.plan.outputs.s3_prefix == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.upload.name }}
+          path: ${{ matrix.upload.paths_joined }}
+          retention-days: ${{ matrix.upload.retention != '' && matrix.upload.retention || '90' }}
+          if-no-files-found: ${{ matrix.upload.if_no_files }}
+
+      - name: Upload build outputs -> S3
+        if: ${{ matrix.upload.name != '' && needs.plan.outputs.s3_prefix != '' }}
+        shell: bash
+        env:
+          DP_S3_PREFIX: ${{ needs.plan.outputs.s3_prefix }}
+          BUCKET: ${{ secrets.TIGRIS_BUCKET }}
+          S3_URL: ${{ secrets.TIGRIS_S3_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_SECRET_ACCESS_KEY }}
+          NAME: ${{ matrix.upload.name }}
+          PATHS: ${{ matrix.upload.paths_joined }}
+          IF_NO_FILES: ${{ matrix.upload.if_no_files }}
+        run: bash scripts/s3_upload.sh
+
+  build-l1:
+    needs: [plan, build-l0]
+    if: always() && !failure() && !cancelled() && needs.plan.outputs.layer1 != '[]'
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: ${{ matrix.timeout || 360 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.layer1) }}
+    env:
+      UNIT_JSON: ${{ toJSON(matrix) }}
+      DP_REPO_DIR: dp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DAISIUM_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.CI_PAT_STRING }}
+          path: dp
+
+      - name: Restore build.yml cache
+        id: dp-cache
+        if: matrix.cache.key != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.cache.paths_joined }}
+          key: ${{ matrix.cache.key }}
+          restore-keys: ${{ matrix.cache.restore_keys }}
+
+      - name: Ensure aws CLI (S3 backend)
+        if: needs.plan.outputs.s3_prefix != ''
+        run: |
+          command -v aws >/dev/null 2>&1 || {
+            sudo apt-get update -y
+            sudo apt-get install -y awscli
+          }
+
+      - name: Execute build.yml steps
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DP_CACHE_STEP_ID: ${{ matrix.cache.step_id }}
+          DP_CACHE_HIT: ${{ steps.dp-cache.outputs.cache-hit }}
+          DP_S3_PREFIX: ${{ needs.plan.outputs.s3_prefix }}
+          BUCKET: ${{ secrets.TIGRIS_BUCKET }}
+          S3_URL: ${{ secrets.TIGRIS_S3_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_SECRET_ACCESS_KEY }}
+        run: python3 scripts/daisium_ci_runner.py exec-unit
+
+      - name: Upload build outputs
+        if: ${{ matrix.upload.name != '' && needs.plan.outputs.s3_prefix == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.upload.name }}
+          path: ${{ matrix.upload.paths_joined }}
+          retention-days: ${{ matrix.upload.retention != '' && matrix.upload.retention || '90' }}
+          if-no-files-found: ${{ matrix.upload.if_no_files }}
+
+      - name: Upload build outputs -> S3
+        if: ${{ matrix.upload.name != '' && needs.plan.outputs.s3_prefix != '' }}
+        shell: bash
+        env:
+          DP_S3_PREFIX: ${{ needs.plan.outputs.s3_prefix }}
+          BUCKET: ${{ secrets.TIGRIS_BUCKET }}
+          S3_URL: ${{ secrets.TIGRIS_S3_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_SECRET_ACCESS_KEY }}
+          NAME: ${{ matrix.upload.name }}
+          PATHS: ${{ matrix.upload.paths_joined }}
+          IF_NO_FILES: ${{ matrix.upload.if_no_files }}
+        run: bash scripts/s3_upload.sh
+
+  build-l2:
+    needs: [plan, build-l0, build-l1]
+    if: always() && !failure() && !cancelled() && needs.plan.outputs.layer2 != '[]'
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: ${{ matrix.timeout || 360 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.layer2) }}
+    env:
+      UNIT_JSON: ${{ toJSON(matrix) }}
+      DP_REPO_DIR: dp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DAISIUM_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.CI_PAT_STRING }}
+          path: dp
+
+      - name: Restore build.yml cache
+        id: dp-cache
+        if: matrix.cache.key != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.cache.paths_joined }}
+          key: ${{ matrix.cache.key }}
+          restore-keys: ${{ matrix.cache.restore_keys }}
+
+      - name: Ensure aws CLI (S3 backend)
+        if: needs.plan.outputs.s3_prefix != ''
+        run: |
+          command -v aws >/dev/null 2>&1 || {
+            sudo apt-get update -y
+            sudo apt-get install -y awscli
+          }
+
+      - name: Execute build.yml steps
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DP_CACHE_STEP_ID: ${{ matrix.cache.step_id }}
+          DP_CACHE_HIT: ${{ steps.dp-cache.outputs.cache-hit }}
+          DP_S3_PREFIX: ${{ needs.plan.outputs.s3_prefix }}
+          BUCKET: ${{ secrets.TIGRIS_BUCKET }}
+          S3_URL: ${{ secrets.TIGRIS_S3_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_SECRET_ACCESS_KEY }}
+        run: python3 scripts/daisium_ci_runner.py exec-unit
+
+      - name: Upload build outputs
+        if: ${{ matrix.upload.name != '' && needs.plan.outputs.s3_prefix == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.upload.name }}
+          path: ${{ matrix.upload.paths_joined }}
+          retention-days: ${{ matrix.upload.retention != '' && matrix.upload.retention || '90' }}
+          if-no-files-found: ${{ matrix.upload.if_no_files }}
+
+      - name: Upload build outputs -> S3
+        if: ${{ matrix.upload.name != '' && needs.plan.outputs.s3_prefix != '' }}
+        shell: bash
+        env:
+          DP_S3_PREFIX: ${{ needs.plan.outputs.s3_prefix }}
+          BUCKET: ${{ secrets.TIGRIS_BUCKET }}
+          S3_URL: ${{ secrets.TIGRIS_S3_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_SECRET_ACCESS_KEY }}
+          NAME: ${{ matrix.upload.name }}
+          PATHS: ${{ matrix.upload.paths_joined }}
+          IF_NO_FILES: ${{ matrix.upload.if_no_files }}
+        run: bash scripts/s3_upload.sh

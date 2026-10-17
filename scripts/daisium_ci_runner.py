@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-daisium_ci_runner.py - parse Daisium_Predict's .github/workflows/ci.yml and
-execute its build steps locally (inside NightlyCompiler's Actions runners).
+daisium_ci_runner.py - parse a Daisium-family workflow and execute its build
+steps locally (inside NightlyCompiler's Actions runners).
+
+Used by:
+  * daisium_predict_compiler.yaml -> Daisium_Predict/.github/workflows/ci.yml
+  * daisium_engine_compiler.yaml  -> Daisium/.github/workflows/build.yml
+    (with --runner ubuntu-24.04, i.e. the whole self-hosted Linux matrix
+     executed on GitHub-hosted Linux)
 
 Modes:
   plan      : read ci.yml -> expand matrices -> emit normalized "units" (each
@@ -51,7 +57,13 @@ SUPPORTED_USES = {
     "dotnet": ["actions/setup-dotnet"],
     "cache": ["actions/cache"],
     "download": ["actions/download-artifact"],
-    "upload": ["actions/upload-artifact"],
+    # Daisium's build.yml uploads through a local composite action so the same
+    # step can switch between Actions artifacts and S3.  The runner only needs
+    # the resolved name/path/retention from its `with:`, exactly like the stock
+    # action; the workflow still performs the real upload.
+    "upload": ["actions/upload-artifact",
+               "./.github/actions/upload-output",
+               ".github/actions/upload-output"],
 }
 
 
@@ -203,32 +215,40 @@ def _cond(raw, ctx):
     return _truthy(eval_expr(raw, ctx))
 
 
-def parse(path, inputs, github, repo_dir, outputs_file, summary_file):
+def parse(path, inputs, github, repo_dir, outputs_file, summary_file,
+          runner_override="", s3_prefix=""):
     import yaml
     with open(path, "r", encoding="utf-8") as fh:
         wf = yaml.safe_load(fh)
 
+    # build.yml (unlike Daisium_Predict's ci.yml) gates its S3 download branch on
+    # `needs.init.outputs.s3_prefix`.  The dispatcher computes that prefix before
+    # planning, so seed the needs context here instead of letting the expression
+    # collapse to "" and picking the artifacts branch in S3 mode.
+    needs_ctx = {"init": {"outputs": {"s3_prefix": s3_prefix}}}
+
     top_env = {}
-    ctx0 = {"github": github, "inputs": inputs, "env": {}, "vars": {}, "needs": {}}
+    ctx0 = {"github": github, "inputs": inputs, "env": {}, "vars": {}, "needs": needs_ctx}
     for k, v in (wf.get("env") or {}).items():
         top_env[k] = gh_str(resolve(v, ctx0))
 
     units = []
     buildable_jobs = set()
     for job_id, job in (wf.get("jobs") or {}).items():
-        if not any((s.get("uses") or "").split("@")[0] == "actions/upload-artifact" for s in collect_steps(job)):
+        if not any((s.get("uses") or "").split("@")[0] in SUPPORTED_USES["upload"]
+                   for s in collect_steps(job)):
             continue
         buildable_jobs.add(job_id)
 
     for job_id, job in (wf.get("jobs") or {}).items():
         if job_id not in buildable_jobs:
             continue
-        if "if" in job and not _cond(job["if"], {"github": github, "inputs": inputs, "env": top_env, "needs": {}}):
+        if "if" in job and not _cond(job["if"], {"github": github, "inputs": inputs, "env": top_env, "needs": needs_ctx}):
             continue
         for m in expand_matrix(job):
             ctx = {
                 "github": github, "inputs": inputs, "env": dict(top_env),
-                "matrix": m, "vars": {}, "needs": {},
+                "matrix": m, "vars": {}, "needs": needs_ctx,
                 "strategy": (job.get("strategy") or {}),
                 # No `steps` context on purpose: every `if:` that reads a step
                 # output is deferred to exec-unit (see _STEP_OUTPUT_RE), because
@@ -236,7 +256,7 @@ def parse(path, inputs, github, repo_dir, outputs_file, summary_file):
                 "steps": {},
                 "runner": {"os": "", "arch": "x64"},
             }
-            runs_on = gh_str(resolve(job.get("runs-on", "ubuntu-latest"), ctx))
+            runs_on = runner_override or gh_str(resolve(job.get("runs-on", "ubuntu-latest"), ctx))
             osname = "Windows" if "windows" in runs_on else ("macOS" if "macos" in runs_on or "macos" in str(m) else "Linux")
             ctx["runner"]["os"] = osname
             tag = gh_str(resolve(job.get("name") or job_id, ctx))
@@ -326,9 +346,11 @@ def parse(path, inputs, github, repo_dir, outputs_file, summary_file):
             needs = job.get("needs") or []
             needs = [needs] if isinstance(needs, str) else list(needs)
             deps = sorted(set(n for n in needs if n in buildable_jobs))
+            timeout = gh_str(resolve(job.get("timeout-minutes", ""), ctx))
             units.append({"id": unit_id, "name": tag, "job": job_id, "runs_on": runs_on,
                           "layer": 0, "deps": deps, "upload": upload,
-                          "cache": cache or {}, "blocks": blocks})
+                          "cache": cache or {}, "blocks": blocks,
+                          "timeout": timeout})
 
     # topological layers (max 3)
     by_job = {}
@@ -353,7 +375,7 @@ def parse(path, inputs, github, repo_dir, outputs_file, summary_file):
             fh.write("layer%d=%s\n" % (n, payload))
     if summary_file:
         with open(summary_file, "a", encoding="utf-8") as fh:
-            fh.write("## Daisium_Predict ci.yml plan\n\n")
+            fh.write("## %s plan\n\n" % os.path.basename(path))
             for n, arr in enumerate(layers):
                 for u in arr:
                     fh.write("- L%d `%s` -> `%s` -> artifact `%s`\n" % (n, u["job"], u["runs_on"], u["upload"]["name"]))
@@ -740,6 +762,10 @@ def main():
     p.add_argument("--repo-dir", default="dp")
     p.add_argument("--outputs", default=os.environ.get("GITHUB_OUTPUT", "/tmp/gho"))
     p.add_argument("--summary", default=os.environ.get("GITHUB_STEP_SUMMARY", ""))
+    p.add_argument("--runner", default="",
+                   help="override every job's runs-on, e.g. ubuntu-24.04")
+    p.add_argument("--s3-prefix", default="",
+                   help="run-scoped S3 prefix, used to resolve needs.init.outputs.s3_prefix")
     e = sub.add_parser("exec-unit")
     e.add_argument("--unused", default="")
     a = ap.parse_args()
@@ -754,7 +780,8 @@ def main():
             gref = "refs/heads/" + a.ref
         github = {"ref": gref, "head_ref": a.ref, "event_name": "workflow_dispatch",
                   "event": {"inputs": inputs, "ref": a.ref}, "run_id": os.environ.get("GITHUB_RUN_ID", "0")}
-        parse(a.ci, inputs, github, a.repo_dir, a.outputs, a.summary)
+        parse(a.ci, inputs, github, a.repo_dir, a.outputs, a.summary,
+              runner_override=a.runner, s3_prefix=a.s3_prefix)
     else:
         exec_unit()
 
