@@ -181,10 +181,13 @@ jobs:
       - name: Ensure aws CLI (S3 backend)
         if: needs.plan.outputs.s3_prefix != ''
         run: |
-          command -v aws >/dev/null 2>&1 || {
-            sudo apt-get update -y
-            sudo apt-get install -y awscli
-          }
+          command -v aws >/dev/null 2>&1 && exit 0
+          # Ubuntu 24.04 no longer ships an installable `awscli` apt package;
+          # the hosted image already has v2, and self-hosted images can use the
+          # official installer when they do not.
+          curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          sudo /tmp/aws/install --update
 
       - name: Execute build.yml steps
         env:
@@ -259,10 +262,13 @@ jobs:
       - name: Ensure aws CLI (S3 backend)
         if: needs.plan.outputs.s3_prefix != ''
         run: |
-          command -v aws >/dev/null 2>&1 || {
-            sudo apt-get update -y
-            sudo apt-get install -y awscli
-          }
+          command -v aws >/dev/null 2>&1 && exit 0
+          # Ubuntu 24.04 no longer ships an installable `awscli` apt package;
+          # the hosted image already has v2, and self-hosted images can use the
+          # official installer when they do not.
+          curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          sudo /tmp/aws/install --update
 
       - name: Execute build.yml steps
         env:
@@ -334,10 +340,13 @@ jobs:
       - name: Ensure aws CLI (S3 backend)
         if: needs.plan.outputs.s3_prefix != ''
         run: |
-          command -v aws >/dev/null 2>&1 || {
-            sudo apt-get update -y
-            sudo apt-get install -y awscli
-          }
+          command -v aws >/dev/null 2>&1 && exit 0
+          # Ubuntu 24.04 no longer ships an installable `awscli` apt package;
+          # the hosted image already has v2, and self-hosted images can use the
+          # official installer when they do not.
+          curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          sudo /tmp/aws/install --update
 
       - name: Execute build.yml steps
         env:
